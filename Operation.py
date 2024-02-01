@@ -410,7 +410,7 @@ def move(to_manipulator):
     for i in range(5) :
         to_manipulator[i] = int(to_manipulator[i]*1000)
 
-    cmd = "rosrun open_manipulator_p_teleop client"
+    cmd = "rosservice call path"
 
     for i in to_manipulator:
         cmd += " " + str(i)
