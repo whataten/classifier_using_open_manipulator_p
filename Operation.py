@@ -9,6 +9,23 @@ from ultralytics import YOLO
 from PIL import Image
 import cv2
 
+RELATIVE_RATIO  = 1.8
+RADIUS_BUFFER   = 15
+HEIGHT_BUFFER   = 70
+FULL_DEPTH      = 1075
+L1              = 265.69
+L2              = 259.73
+LEFT_LIMIT      = 230
+RIGHT_LIMIT     = 480
+UP_LIMIT        = 15
+DOWN_LIMIT      = 225
+HOME            = [0, 0, -math.pi/4, 0, 0]
+STANDBY_TIME    = 6
+DEPTH_ERROR     = 12
+POSE_EST_VALUE  = 36
+DOF             = 5
+BASE            = [352, 292]
+
 #############################################
 ################# Functions #################
 #############################################
@@ -38,7 +55,7 @@ def pixel2length(pixel):
         float: 변환된 픽셀의 [mm]
     """
     
-    length = pixel * 1.8
+    length = pixel * RELATIVE_RATIO
     
     return length
 
@@ -52,15 +69,10 @@ def get_radius(center):
         float: 매니퓰레이터 중심에서 물체와의 거리 [mm]
     """
     
-    buffer = 15
-    # buffer = 0
+    x = abs(center[0] - BASE[0])
+    y = abs(center[1] - BASE[1])
     
-    home = [352, 292]
-    
-    x = abs(center[0] - home[0])
-    y = abs(center[1] - home[1])
-    
-    radius = pixel2length(math.sqrt(x**2 + y**2) - buffer)
+    radius = pixel2length(math.sqrt(x**2 + y**2) - RADIUS_BUFFER)
     
     return radius
 
@@ -74,13 +86,11 @@ def get_obj_height(depth):
         int: 그리퍼의 파지를 위한 높이 [mm]
     """
     
-    std_depth = 1075
-    obj_height = std_depth - depth
+    obj_height = FULL_DEPTH - depth
     
-    buffer = 70
-    grasp_height = (obj_height / 2) + buffer
+    grasp_height = (obj_height / 2) + HEIGHT_BUFFER
     
-    # 안전장치
+    # limit 
     if (depth > 1070):
         grasp_height = 150
     
@@ -95,21 +105,19 @@ def get_theta_0(center):
     Returns:
         float: Joint_0의 각 [radian]
     """
-
-    home = [352, 292]
     
-    x = abs(center[0] - home[0])
-    y = abs(center[1] - home[1])
+    x = abs(center[0] - BASE[0])
+    y = abs(center[1] - BASE[1])
     
     theta_0 = math.atan(x/y)
     
     # 부호 결정
-    if (center[0] - home[0]) > 0:
+    if (center[0] - BASE[0]) > 0:
         theta_0 = -theta_0
     
     return theta_0
 
-def makeFit(theta_0, theta_1, theta_2, theta_4, theta_5) :
+def makeFit(theta_0, theta_1, theta_2, theta_4, theta_5):
     """역기구학 결과를 Open-Manipulator-P에 맞도록 변환
 
     Args:
@@ -124,7 +132,6 @@ def makeFit(theta_0, theta_1, theta_2, theta_4, theta_5) :
     """
     
     cvtd_Theta_0 = theta_0
-    # cvtd_Theta_0 = theta_0 + math.radians(math.asin(21.5/float(radius)))
     cvtd_Theta_1 = math.radians(83.52) - theta_1
     cvtd_Theta_2 = math.radians(-38.52) - theta_2
     cvtd_Theta_4 = - theta_4
@@ -134,7 +141,7 @@ def makeFit(theta_0, theta_1, theta_2, theta_4, theta_5) :
     
     return result
 
-def inverseKinematics(radius, height) :
+def inverseKinematics(radius, height):
     """역기구학을 통해 각 관절의 각을 계산
 
     Args:
@@ -145,10 +152,15 @@ def inverseKinematics(radius, height) :
         float: 각 관절의 각 [radian]
     """
     
-    L1 = 265.69
-    L2 = 259.73
-
+    theta_1 = 0
+    theta_2 = 0
+    theta_4 = 0
     hypotenuse = (radius**2) + (height**2)
+    
+    # 도달 불가능 
+    if hypotenuse > (L1 + L2)**2:
+        return None
+    
     beta = math.atan2(height, radius)
     
     # 해 존재 유무 검사
@@ -159,7 +171,7 @@ def inverseKinematics(radius, height) :
     domain = (hypotenuse + (L1**2) - (L2**2)) / float(2 * L1 * math.sqrt(hypotenuse))
     if (-1 <= domain and domain <= 1):
         psi = math.acos(domain)
-    else :
+    else:
         psi = 0
 
     # A Solution Set
@@ -169,11 +181,12 @@ def inverseKinematics(radius, height) :
 
     theta_2A = math.acos((hypotenuse - (L1**2) - (L2**2)) / float(2 * L1 * L2))
 
-    if (theta_2A < 0) :
+    if (theta_2A < 0):
         theta_1A = beta + psi
-    else :
+    else:
         theta_1A = beta - psi
-        
+    
+    # 엔드 이펙터의 링크축이 xy평면과 항상 수직(법선)이도록 90도로 고정    
     theta_4A = math.radians(-90) - theta_1A - theta_2A
 
     # B Solution Set
@@ -183,26 +196,27 @@ def inverseKinematics(radius, height) :
 
     theta_2B = - theta_2A
 
-    if (theta_2B < 0) :
+    if (theta_2B < 0):
         theta_1B = beta + psi
-    else :
+    else:
         theta_1B = beta - psi
-        
+    
+    # 엔드 이펙터의 링크축이 xy평면과 항상 수직(법선)이도록 90도로 고정
     theta_4B = math.radians(-90) - theta_1B - theta_2B
 
     # Choose Theta Set
-    theta_1 = 0
-    theta_2 = 0
-    theta_4 = 0
-
-    if (abs(theta_4A) <= (math.pi/2)) :
+    if (abs(theta_4A) <= (math.pi/2)):
         theta_1 = theta_1A
         theta_2 = theta_2A
         theta_4 = theta_4A
-    else :
+    else:
         theta_1 = theta_1B
         theta_2 = theta_2B
         theta_4 = theta_4B
+        
+    # 도달 불가능 
+    if (abs(theta_4) >= (math.pi/2)):
+        return None
     
     return theta_1, theta_2, theta_4
 
@@ -369,7 +383,7 @@ def rotateObj(input, steps):
     # step * i 마다 바운딩 박스 좌표를 찾는 과정
     area_list = []
     
-    # x가 길면 1, y가 길면 0
+    # x > y ? 1 : 0
     orient_hint_list = []
     
     for i in range(0, steps):
@@ -387,7 +401,7 @@ def rotateObj(input, steps):
         #  step * i 마다 긴 부분 힌트를 저장
         if (x_max - x_min) > (y_max - y_min):
             orient_hint_list.append(1)
-        else :
+        else:
             orient_hint_list.append(0)
             
     area_array = np.array(area_list)
@@ -397,7 +411,7 @@ def rotateObj(input, steps):
     # 각도(radian)를 반환
     if (orient_hint_list[min_idx]):
         return math.radians(int(step * np.argmin(area_array)) + 90)
-    else :
+    else:
         return math.radians(int(step * np.argmin(area_array)))
 
 def move(to_manipulator):
@@ -407,7 +421,7 @@ def move(to_manipulator):
         to_manipulator (float[]): 목표 관절 각도의 리스트
     """
     
-    for i in range(5) :
+    for i in range(DOF):
         to_manipulator[i] = int(to_manipulator[i]*1000)
 
     cmd = "rosservice call path"
@@ -451,8 +465,26 @@ def classify(class_name):
         return math.radians(75), 400
     elif (class_name == 'paperpack'):
         return math.radians(-105), 400
-    else :
+    else:
         return math.radians(105), 400
+    
+def initializing(segmentation):
+    """매니퓰레이터를 초기화하며 동작 준비
+
+    Args:
+        segmentation (Segmentation): 모델 로드
+
+    Returns:
+        [] : [[center[0] - align_x, center[1] - align_y], theta_5, class_name]
+        [] : depth image
+    """
+    move(HOME)
+    gripper_open()
+    time.sleep(STANDBY_TIME)
+    color_image, depth_image = camera.get()
+    inf_result = segmentation.execute(color_image)
+    
+    return inf_result, depth_image
 
 #############################################
 ################## Classes ##################
@@ -468,7 +500,7 @@ class Segmentation():
         output = self.model(input_image)
         
         reachable_obj_idx_list = []
-        flag = False
+        isReachable = False
         
         # output is the number of pictures
         if output and len(output) != 0:
@@ -484,13 +516,13 @@ class Segmentation():
                     center = [int((bbox[0] + bbox[2]) / 2) , int((bbox[1] + bbox[3]) / 2)]    
                     
                     # limit space
-                    if 230 < center[0] and center[0] < 480:
-                        if 15 < center[1] and center[1] < 225: 
-                            flag = True
+                    if LEFT_LIMIT < center[0] and center[0] < RIGHT_LIMIT:
+                        if UP_LIMIT < center[1] and center[1] < DOWN_LIMIT: 
+                            isReachable = True
                     
-                    if flag:
+                    if isReachable:
                         reachable_obj_idx_list.append(i)
-                        flag = False
+                        isReachable = False
                 
                 if len(reachable_obj_idx_list) == 0:
                     return None
@@ -514,21 +546,19 @@ class Segmentation():
                 bbox = instances.boxes.xyxy[max_index].cpu().numpy()
                 center = [int((bbox[0] + bbox[2]) / 2) , int((bbox[1] + bbox[3]) / 2)]
                 
-                # angle 계산
                 mask = instances.masks.data[max_index].cpu().numpy()
                 
                 # 확인용 사진 저장
                 # segmented_image = Image.fromarray(np.uint8(np.where(mask[..., None], input_image, [0, 0, 0])))
                 # segmented_image.save('/root/yolov8/output.png', format='PNG')
                 
-                theta_5 = rotateObj(mask, 36)
+                theta_5 = rotateObj(mask, POSE_EST_VALUE)
         
                 # class_id
                 class_name = instances.names[int(instances.boxes.cls[max_index].item())]
         
         # return [[center[0] - align_x, center[1] - align_y], theta_5, class_name]
         return [[center[0], center[1]], theta_5, class_name]
-    
 
 # multi-threading setting
 lock = threading.Lock()
@@ -551,7 +581,7 @@ class Depth_Camera():
         print(" > Serial number : {}".format(connect_device))
         self.config.enable_device(connect_device)
         self.config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 6)
-        self.config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 6)
+        self.config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 6)
 
     def __del__(self):
         print("Collecting process is done.\n")
@@ -573,8 +603,7 @@ class Depth_Camera():
                 depth_frame = aligned_frames.get_depth_frame()
                 color_frame = aligned_frames.get_color_frame()
                 depth_info = depth_frame.as_depth_frame()
-                self.bgr_color_image = np.asanyarray(color_frame.get_data())
-                self.rgb_color_image = cv2.cvtColor(self.bgr_color_image, cv2.COLOR_BGR2RGB)
+                self.rgb_color_image = np.asanyarray(color_frame.get_data())
                 # cv2.imshow('color', self.color_image)
                 # cv2.waitKey(100)
                 # cv2.destroyAllWindows()
@@ -592,122 +621,105 @@ class Depth_Camera():
 ################### Main ####################
 #############################################
 
-# Connect Camera
-camera = Depth_Camera()
+if __name__ == 'Operation':
+    # Connect Camera
+    camera = Depth_Camera()
 
-# Connect Manipulator
-# os.system("roscore")
-# os.system("roslaunch open_manipulator_p_controller open_manipulator_p_controller.launch with_gripper:=true")
-# os.system("roslaunch open_manipulator_p_teleop open_manipulator_p_teleop_keyboard.launch with_gripper:=true")
+    # Connect Manipulator
+    # os.system("roscore")
+    # os.system("roslaunch open_manipulator_p_controller open_manipulator_p_controller.launch with_gripper:=true")
+    # os.system("roslaunch open_manipulator_p_teleop open_manipulator_p_teleop_keyboard.launch with_gripper:=true")
 
-# Threading Setting
-camera_thread = threading.Thread(target=camera.execute)
-camera_thread.daemon = True
-camera_thread.start()
+    # Threading Setting
+    camera_thread = threading.Thread(target=camera.execute)
+    camera_thread.daemon = True
+    camera_thread.start()
 
-# Initial Set
-segmentation = Segmentation()
+    # Initial Set
+    segmentation = Segmentation()
 
-# Initial Setting
-home = [0, 0, -math.pi/4, 0, 0]
-move(home)
-gripper_open()
-time.sleep(6)
-color_image, depth_image = camera.get()
-inf_result = segmentation.execute(color_image)
+    # Initial Setting
+    inf_result, depth_image = initializing(segmentation)
 
-while(True):
-    
-    # Limit Workspace
-    if (inf_result is None):
-        # Initializing again
-        gripper_open()
-        # stopby = [0, 0, 0, 0, 0]
-        # move(stopby)
-        # time.sleep(2)
-        home = [0, 0, -math.pi/4, 0, 0]
-        move(home)
-        time.sleep(2)
-        color_image, depth_image = camera.get()
-        inf_result = segmentation.execute(color_image)
-        continue
-
-    ### Pick-and-Place ###
-
-    # calculate standards
-    obj_center = inf_result[0]
-    theta_5 = inf_result[1]
-    theta_0 = get_theta_0(obj_center)
-    class_name = inf_result[2]
-    depth = int(round((depth_image.get_distance(obj_center[0], obj_center[1]) * 1000), 1))
-    radius = get_radius(obj_center)
-    height = get_obj_height(depth)
-    cvtd_theta_5 = convert_theta_5(theta_0, theta_5)
-    
-    # Pick Process 1 : move to top of object, in 2s
-    temp_height = height * 1.5
-    if (inverseKinematics(radius, temp_height) is None):
-        inf_result = None
-        continue
-    theta_1, theta_2, theta_4 = inverseKinematics(radius, temp_height)
-    if (abs(theta_4) >= (math.pi/2)) :
-        print()
-    to_manipulator = makeFit(theta_0, theta_1, theta_2, theta_4, cvtd_theta_5)
-    move(to_manipulator)
-    time.sleep(2)
-    
-    # Pick Process 2 : move to object, open gripper, in 2s
-    if (inverseKinematics(radius, height + 12) is None):
-        inf_result = None
-        continue
-    theta_1, theta_2, theta_4 = inverseKinematics(radius, height + 12)
-    if (abs(theta_4) >= (math.pi/2)) :
-        print()
-    to_manipulator = makeFit(theta_0, theta_1, theta_2, theta_4, cvtd_theta_5)
-    move(to_manipulator)
-    time.sleep(2)
-    
-    # Pick Process 3 : close gripper, in 1s
-    gripper_close()
-    time.sleep(1)
-    
-    # Pick Process 4 : move upward, in 2s
-    temp_height = 220
-    
     while(True):
+        
+        # Limit Workspace
+        if (inf_result is None):
+            # Initializing again
+            inf_result, depth_image = initializing(segmentation)
+            continue
+
+        ### Pick-and-Place ###
+
+        # calculate standards
+        obj_center      = inf_result[0]
+        theta_5         = inf_result[1]
+        theta_0         = get_theta_0(obj_center)
+        class_name      = inf_result[2]
+        depth           = int(round((depth_image.get_distance(obj_center[0], obj_center[1]) * 1000), 1))
+        radius          = get_radius(obj_center)
+        height          = get_obj_height(depth)
+        cvtd_theta_5    = convert_theta_5(theta_0, theta_5)
+        
+        # Pick Process 1 : Move to top of object
+        temp_height = height * 1.5
         if (inverseKinematics(radius, temp_height) is None):
-            temp_height -= 1
-        else :
-            break
-    
-    theta_1, theta_2, theta_4 = inverseKinematics(radius, temp_height)
-    
-    if (abs(theta_4) >= (math.pi/2)) :
-        print()
-    
-    to_manipulator = makeFit(theta_0, theta_1, theta_2, theta_4, cvtd_theta_5)
-    move(to_manipulator)
-    time.sleep(2)
-    
-    # Place Process 1 : move to top of trash can, in 2s
-    cvtd_theta_0, radius = classify(class_name)
-    if (inverseKinematics(radius, temp_height) is None):
-        inf_result = None
-        continue
-    theta_1, theta_2, theta_4 = inverseKinematics(radius, temp_height)
-    if (abs(theta_4) >= (math.pi/2)) :
-        print()
-    to_manipulator = makeFit(cvtd_theta_0, theta_1, theta_2, theta_4, cvtd_theta_5)
-    move(to_manipulator)
-    time.sleep(2)
-    
-    # Pick Process 6 : open gripper, in 0.8s
-    gripper_open()
-    
-    # Take picture
-    color_image, depth_image = camera.get()
-    
-    # Instance Segmentation
-    inf_result = segmentation.execute(color_image)
-    
-    time.sleep(0.5)
+            inf_result = None
+            continue
+        theta_1, theta_2, theta_4 = inverseKinematics(radius, temp_height)
+        to_manipulator = makeFit(theta_0, theta_1, theta_2, theta_4, cvtd_theta_5)
+        move(to_manipulator)
+        time.sleep(2)
+        
+        # Pick Process 2 : Move to object, open gripper
+        if (inverseKinematics(radius, height + DEPTH_ERROR) is None):
+            inf_result = None
+            continue
+        theta_1, theta_2, theta_4 = inverseKinematics(radius, height + DEPTH_ERROR)
+        to_manipulator = makeFit(theta_0, theta_1, theta_2, theta_4, cvtd_theta_5)
+        move(to_manipulator)
+        time.sleep(2)
+        
+        # Pick Process 3 : Close gripper
+        gripper_close()
+        time.sleep(1)
+        
+        # Pick Process 4 : Move upward
+        temp_height = 220
+        
+        # 들어올릴 높이 결정
+        while(True):
+            if (inverseKinematics(radius, temp_height) is None):
+                temp_height -= 1
+            
+            elif temp_height == 150:
+                inf_result = None
+                break
+            
+            else:
+                break
+        
+        theta_1, theta_2, theta_4 = inverseKinematics(radius, temp_height)
+        to_manipulator = makeFit(theta_0, theta_1, theta_2, theta_4, cvtd_theta_5)
+        move(to_manipulator)
+        time.sleep(2)
+        
+        # Place Process 1 : Move to top of trash can
+        cvtd_theta_0, radius = classify(class_name)
+        if (inverseKinematics(radius, temp_height) is None):
+            inf_result = None
+            continue
+        theta_1, theta_2, theta_4 = inverseKinematics(radius, temp_height)
+        to_manipulator = makeFit(cvtd_theta_0, theta_1, theta_2, theta_4, cvtd_theta_5)
+        move(to_manipulator)
+        time.sleep(2)
+        
+        # Pick Process 2 : Open gripper & Restart
+        gripper_open()
+
+        # Take picture
+        color_image, depth_image = camera.get()
+
+        # Instance Segmentation
+        inf_result = segmentation.execute(color_image)
+        time.sleep(0.5)
