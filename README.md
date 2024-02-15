@@ -25,4 +25,4 @@
 
 ### Docker
 
-+ [https://hub.docker.com/r/whataten/classifier](https://hub.docker.com/r/whataten/classifier)
++ [https://hub.docker.com/r/whataten/classifier](https://hub.docker.com/r/whataten/classifier/tags)
